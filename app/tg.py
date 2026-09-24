@@ -1,6 +1,7 @@
 """Минимальный клиент Telegram Bot API (без внешних SDK)."""
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -22,6 +23,9 @@ class Telegram:
             )
             payload = response.json()
             if not payload.get("ok"):
+                description = payload.get("description") or ""
+                if "message is not modified" in description:
+                    return None  # повторное нажатие той же кнопки
                 log.error("%s: %s", method, payload.get("description"))
                 return None
             return payload["result"]
@@ -32,7 +36,16 @@ class Telegram:
             log.error("%s: некорректный ответ сервера", method)
             return None
 
-    def send(self, chat_id: int, text: str, disable_notification: bool = False):
+    def send(
+        self,
+        chat_id: int,
+        text: str,
+        disable_notification: bool = False,
+        reply_markup: dict | None = None,
+    ):
+        params = {}
+        if reply_markup:
+            params["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
         return self._call(
             "sendMessage",
             chat_id=chat_id,
@@ -40,6 +53,33 @@ class Telegram:
             parse_mode="HTML",
             disable_web_page_preview=True,
             disable_notification=disable_notification,
+            **params,
+        )
+
+    def edit(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: dict | None = None,
+    ):
+        params = {}
+        if reply_markup:
+            params["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+        return self._call(
+            "editMessageText",
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            **params,
+        )
+
+    def answer_callback(self, callback_id: str, text: str | None = None):
+        params = {"text": text, "show_alert": True} if text else {}
+        return self._call(
+            "answerCallbackQuery", callback_query_id=callback_id, **params
         )
 
     def broadcast(self, text: str, disable_notification: bool = False):
@@ -58,8 +98,6 @@ class Telegram:
         return result
 
     def set_commands(self, commands: list[tuple[str, str]]):
-        import json
-
         return self._call(
             "setMyCommands",
             commands=json.dumps(
