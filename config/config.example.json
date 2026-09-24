@@ -1,0 +1,26 @@
+{
+  "poll_interval": 10,
+  "fail_threshold": 3,
+  "ok_threshold": 2,
+  "internet_alert_after": 120,
+  "network": {
+    "internet_hosts": ["77.88.8.8", "8.8.8.8"],
+    "ping_count": 1,
+    "ping_timeout": 2,
+    "ping_deadline": 3
+  },
+  "targets": [
+    {
+      "id": "home",
+      "name": "Дом",
+      "emoji": "🏠",
+      "hosts": ["217.199.235.61"]
+    },
+    {
+      "id": "work",
+      "name": "Работа",
+      "emoji": "🏢",
+      "hosts": ["46.162.18.93", "78.31.178.137"]
+    }
+  ]
+}
