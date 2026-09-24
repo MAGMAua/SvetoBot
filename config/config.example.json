@@ -2,6 +2,7 @@
   "poll_interval": 10,
   "fail_threshold": 3,
   "ok_threshold": 2,
+  "outage_confirm_after": 300,
   "internet_alert_after": 120,
   "network": {
     "internet_hosts": ["77.88.8.8", "8.8.8.8"],

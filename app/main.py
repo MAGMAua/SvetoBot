@@ -61,13 +61,13 @@ def main() -> None:
     telegram = Telegram(token, chat_ids)
     monitor = Monitor(config, storage, telegram)
 
-    poll = config.get("poll_interval", 10)
-    fail = config.get("fail_threshold", 3)
     log.info(
-        "объектов: %d, опрос каждые %s с, отключение подтверждается за ~%s с",
+        "объектов: %d, опрос каждые %s с, «нет связи» через ~%s с, "
+        "«света нет» через %s с",
         len(config["targets"]),
-        poll,
-        poll * fail,
+        monitor.poll,
+        monitor.poll * monitor.fail_threshold,
+        monitor.confirm_after,
     )
     monitor.start()
     Bot(telegram, storage, monitor).run()

@@ -198,15 +198,27 @@ class Bot:
 
             status = state["status"]
             since = state["since_ts"]
-            verb = "пропал" if status == DOWN else "появился"
-            lines = [
-                f"{ICON[status]} <b>{LABEL[status]}</b> · {target_title(target)}",
-                f"Уже {fmt_duration(now_ts() - since)} — {verb} {fmt_when(since)}",
-            ]
+            suspect = self.monitor.suspect_since(target["id"])
             pending = self.monitor.pending_info(target["id"])
+            if suspect:
+                deadline = suspect + self.monitor.confirm_after
+                lines = [
+                    f"🟡 <b>Нет связи</b> · {target_title(target)}",
+                    f"Не отвечает уже {fmt_duration(now_ts() - suspect)} — "
+                    "возможно, пропал свет",
+                    f"Если связь не появится до {fmt_short_time(deadline)}, "
+                    "это отключение",
+                ]
+                pending = None
+            else:
+                verb = "пропал" if status == DOWN else "появился"
+                lines = [
+                    f"{ICON[status]} <b>{LABEL[status]}</b> · {target_title(target)}",
+                    f"Уже {fmt_duration(now_ts() - since)} — {verb} {fmt_when(since)}",
+                ]
             if pending:
                 if pending[0] == DOWN:
-                    hint = "нет ответа, проверяю, не пропал ли свет"
+                    hint = "нет ответа, проверяю связь"
                     needed = self.monitor.fail_threshold
                 else:
                     hint = "появился ответ, проверяю, вернулся ли свет"
@@ -233,11 +245,10 @@ class Bot:
             if status == NONET:
                 line += " — у сервера нет интернета"
             lines.append(line)
-        confirm = self.monitor.poll * self.monitor.fail_threshold
         if NONET not in statuses:
             lines.append(
-                "\n<i>Это одна проверка без подтверждения. Если она расходится "
-                f"со статусом, смена подтвердится в течение ~{confirm} сек.</i>"
+                "\n<i>Это одна проверка без подтверждения — статус меняется "
+                "только после нескольких проверок подряд.</i>"
             )
         self._reply(chat_id, "\n".join(lines))
         # Полноценная проверка со сменой статуса и уведомлениями.
@@ -281,7 +292,7 @@ class Bot:
             )
         lines.append(
             "\n<i>Объект ненадолго перестал отвечать и снова появился раньше, "
-            "чем подтвердилось отключение. Статус не менялся, уведомлений не было.</i>"
+            "чем подтвердилось отключение. Статус не менялся.</i>"
         )
         self._reply(chat_id, "\n".join(lines))
 
