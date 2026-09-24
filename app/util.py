@@ -33,6 +33,31 @@ def fmt_short_time(ts: int | None) -> str:
     return moment.strftime("%H:%M")
 
 
+def fmt_when(ts: int | None) -> str:
+    """Относительно сегодняшнего дня: 'сегодня в 15:22', 'вчера в 23:10', '21.09 в 08:05'."""
+    if not ts:
+        return "—"
+    tz = TZ or dt.timezone.utc
+    moment = dt.datetime.fromtimestamp(ts, tz)
+    days_ago = (dt.datetime.now(tz).date() - moment.date()).days
+    clock = moment.strftime("%H:%M")
+    if days_ago == 0:
+        return f"сегодня в {clock}"
+    if days_ago == 1:
+        return f"вчера в {clock}"
+    if moment.year == dt.datetime.now(tz).year:
+        return f"{moment.strftime('%d.%m')} в {clock}"
+    return f"{moment.strftime('%d.%m.%Y')} в {clock}"
+
+
+def fmt_day_time(ts: int | None) -> str:
+    """Для журнала: 24.09 15:22"""
+    if not ts:
+        return "—"
+    moment = dt.datetime.fromtimestamp(ts, TZ or dt.timezone.utc)
+    return moment.strftime("%d.%m %H:%M")
+
+
 def fmt_duration(seconds: int | None) -> str:
     """4520 -> '1 ч 15 мин'"""
     if seconds is None or seconds < 0:

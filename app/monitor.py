@@ -12,12 +12,12 @@ import threading
 import time
 
 from checker import DOWN, NONET, UP, Checker
-from util import fmt_duration, fmt_time, now_ts
+from util import escape_html, fmt_duration, fmt_when, now_ts
 
 log = logging.getLogger("monitor")
 
-LABEL = {UP: "Свет есть", DOWN: "Света нет", NONET: "Нет связи"}
-ICON = {UP: "💡", DOWN: "🕯", NONET: "❓"}
+LABEL = {UP: "Свет есть", DOWN: "Света нет", NONET: "Неизвестно"}
+ICON = {UP: "🟢", DOWN: "🔴", NONET: "⚪"}
 
 TOUCH_EVERY = 60  # как часто записывать факт проверки в БД, секунд
 
@@ -40,7 +40,7 @@ class Monitor:
         self._pending: dict[str, list] = {}       # id -> [status, count]
         self._touched: dict[str, int] = {}
 
-        self._nonet_streak = 0
+        self._nonet_since: int | None = None   # с какого момента у сервера нет сети
         self._nonet_notified = False
 
         self._wake = threading.Event()
@@ -65,8 +65,9 @@ class Monitor:
         pending = self._pending.get(target_id)
         return (pending[0], pending[1]) if pending else None
 
-    def server_offline(self) -> bool:
-        return self._nonet_notified
+    def server_offline_since(self) -> int | None:
+        """Момент потери связи сервером, если она пропала надолго, иначе None."""
+        return self._nonet_since if self._nonet_notified else None
 
     # ---------- цикл ----------
 
@@ -83,22 +84,29 @@ class Monitor:
 
     def _tick(self) -> None:
         if not self.checker.internet_alive():
-            self._nonet_streak += 1
-            offline_for = self._nonet_streak * self.poll
+            if self._nonet_since is None:
+                self._nonet_since = now_ts()
+            offline_for = now_ts() - self._nonet_since
             if not self._nonet_notified and offline_for >= self.internet_alert_after:
                 self._nonet_notified = True
+                # Дойдёт, только если пропал ICMP, а не весь интернет.
                 self.telegram.broadcast(
-                    "⚠️ <b>Сервер потерял связь с интернетом</b>\n"
-                    "Проверка объектов приостановлена, статусы сохранены."
+                    "⚠️ <b>Сервер без интернета</b>\n"
+                    f"Связь пропала {fmt_when(self._nonet_since)} — "
+                    "проверка света приостановлена.\n"
+                    "Статусы объектов сохранены. Сообщу, когда связь вернётся."
                 )
             log.warning("нет связи у сервера (%s с)", offline_for)
             return
 
         if self._nonet_notified:
             self.telegram.broadcast(
-                "✅ <b>Связь восстановлена</b>\nПроверка объектов продолжена."
+                "✅ <b>Сервер снова на связи</b>\n"
+                f"Связь пропала {fmt_when(self._nonet_since)}, "
+                f"не было {fmt_duration(now_ts() - self._nonet_since)}.\n"
+                "Всё это время свет не проверялся — проверка продолжена."
             )
-        self._nonet_streak = 0
+        self._nonet_since = None
         self._nonet_notified = False
 
         for target in self.targets:
@@ -170,21 +178,33 @@ class Monitor:
 
     def _notify_start(self, target: dict, status: str) -> None:
         self.telegram.broadcast(
-            f"{target.get('emoji', '')} <b>{target['name']}</b>\n"
-            f"Мониторинг запущен. Сейчас: {ICON[status]} {LABEL[status]}",
+            f"{ICON[status]} <b>{LABEL[status]}</b> · {target_title(target)}\n"
+            "Мониторинг запущен.",
             disable_notification=True,
         )
 
     def _notify_change(
         self, target: dict, status: str, duration: int | None, changed_at: int
     ) -> None:
-        lines = [
-            f"{ICON[status]} <b>{target['name']}: {LABEL[status]}</b>",
-            f"Время: {fmt_time(changed_at)}",
-        ]
-        if duration:
-            previous = "со светом" if status == DOWN else "без света"
-            lines.append(
-                f"Предыдущее состояние ({previous}) длилось {fmt_duration(duration)}"
-            )
+        if status == DOWN:
+            lines = [
+                f"{ICON[DOWN]} <b>Света нет</b> · {target_title(target)}",
+                f"Пропал {fmt_when(changed_at)}",
+            ]
+            if duration:
+                lines.append(f"До этого свет был {fmt_duration(duration)}")
+        else:
+            lines = [
+                f"{ICON[UP]} <b>Свет есть</b> · {target_title(target)}",
+                f"Появился {fmt_when(changed_at)}",
+            ]
+            if duration:
+                lines.append(f"Света не было {fmt_duration(duration)}")
         self.telegram.broadcast("\n".join(lines), disable_notification=self._muted())
+
+
+def target_title(target: dict) -> str:
+    """'🏢 Работа' — эмодзи и название объекта."""
+    emoji = target.get("emoji", "")
+    name = escape_html(target["name"])
+    return f"{emoji} {name}" if emoji else name

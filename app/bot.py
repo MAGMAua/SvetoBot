@@ -5,8 +5,8 @@ import logging
 import time
 
 from checker import DOWN, NONET, UP
-from monitor import ICON, LABEL
-from util import escape_html, fmt_duration, fmt_short_time, fmt_time, now_ts
+from monitor import ICON, LABEL, target_title
+from util import escape_html, fmt_day_time, fmt_duration, fmt_short_time, fmt_when, now_ts
 
 log = logging.getLogger("bot")
 
@@ -181,38 +181,41 @@ class Bot:
 
     def cmd_status(self, chat_id: int, args: list[str]) -> None:
         blocks = []
+        offline_since = self.monitor.server_offline_since()
+        if offline_since:
+            blocks.append(
+                f"⚠️ <b>Сервер без интернета</b> уже "
+                f"{fmt_duration(now_ts() - offline_since)}\n"
+                f"Связь пропала {fmt_when(offline_since)} — проверка приостановлена, "
+                "ниже статусы на тот момент."
+            )
+
         for target in self.monitor.targets:
             state = self.storage.get_state(target["id"])
             if not state:
-                blocks.append(
-                    f"{target.get('emoji', '')} <b>{escape_html(target['name'])}</b>\n"
-                    "Данных пока нет"
-                )
+                blocks.append(f"{ICON[NONET]} <b>Нет данных</b> · {target_title(target)}")
                 continue
 
             status = state["status"]
-            elapsed = now_ts() - state["since_ts"]
-            last = self.monitor.last_check.get(target["id"]) or state["last_check_ts"]
+            since = state["since_ts"]
+            verb = "пропал" if status == DOWN else "появился"
             lines = [
-                f"{ICON[status]} <b>{escape_html(target['name'])}: {LABEL[status]}</b>",
-                f"Уже {fmt_duration(elapsed)}, с {fmt_time(state['since_ts'])}",
-                f"Опрошен {fmt_duration(now_ts() - last)} назад" if last else "",
+                f"{ICON[status]} <b>{LABEL[status]}</b> · {target_title(target)}",
+                f"Уже {fmt_duration(now_ts() - since)} — {verb} {fmt_when(since)}",
             ]
             pending = self.monitor.pending_info(target["id"])
             if pending:
-                needed = (
-                    self.monitor.fail_threshold
-                    if pending[0] == DOWN
-                    else self.monitor.ok_threshold
-                )
-                lines.append(
-                    f"⏳ Проверяется смена на «{LABEL[pending[0]]}» "
-                    f"({pending[1]}/{needed})"
-                )
-            blocks.append("\n".join(line for line in lines if line))
-
-        if self.monitor.server_offline():
-            blocks.append("⚠️ У сервера нет связи с интернетом, опрос приостановлен")
+                if pending[0] == DOWN:
+                    hint = "нет ответа, проверяю, не пропал ли свет"
+                    needed = self.monitor.fail_threshold
+                else:
+                    hint = "появился ответ, проверяю, вернулся ли свет"
+                    needed = self.monitor.ok_threshold
+                lines.append(f"⏳ {hint} ({pending[1]}/{needed})")
+            last = self.monitor.last_check.get(target["id"]) or state["last_check_ts"]
+            if last:
+                lines.append(f"<i>проверено {fmt_duration(now_ts() - last)} назад</i>")
+            blocks.append("\n".join(lines))
 
         if self._mute_left():
             blocks.append(f"🔕 Тихий режим ещё {fmt_duration(self._mute_left())}")
@@ -220,14 +223,23 @@ class Bot:
         self._reply(chat_id, "\n\n".join(blocks))
 
     def cmd_check(self, chat_id: int, args: list[str]) -> None:
-        self._reply(chat_id, "Проверяю…")
-        results = []
+        self._reply(chat_id, "🔍 Проверяю…")
+        lines = ["<b>Разовая проверка</b>"]
+        statuses = []
         for target in self.monitor.targets:
             status = self.monitor.checker.check(target["hosts"])
-            results.append(
-                f"{ICON[status]} {escape_html(target['name'])}: {LABEL[status]}"
+            statuses.append(status)
+            line = f"{ICON[status]} {LABEL[status]} · {target_title(target)}"
+            if status == NONET:
+                line += " — у сервера нет интернета"
+            lines.append(line)
+        confirm = self.monitor.poll * self.monitor.fail_threshold
+        if NONET not in statuses:
+            lines.append(
+                "\n<i>Это одна проверка без подтверждения. Если она расходится "
+                f"со статусом, смена подтвердится в течение ~{confirm} сек.</i>"
             )
-        self._reply(chat_id, "\n".join(results))
+        self._reply(chat_id, "\n".join(lines))
         # Полноценная проверка со сменой статуса и уведомлениями.
         self.monitor.check_now()
 
@@ -238,16 +250,18 @@ class Bot:
             self._reply(chat_id, "Журнал пуст.")
             return
 
-        names = {t["id"]: t["name"] for t in self.monitor.targets}
+        targets = {t["id"]: t for t in self.monitor.targets}
         lines = [f"<b>Последние события ({len(events)})</b>"]
         for event in events:
-            name = names.get(event["target_id"], event["target_id"])
+            target = targets.get(event["target_id"], {"name": event["target_id"]})
+            status = event["status"]
             line = (
-                f"{ICON[event['status']]} {fmt_time(event['ts'])} — "
-                f"{escape_html(name)}: {LABEL[event['status']]}"
+                f"{ICON[status]} {fmt_day_time(event['ts'])} · "
+                f"{target_title(target)} — {LABEL[status].lower()}"
             )
             if event["duration"]:
-                line += f" (пред. {fmt_duration(event['duration'])})"
+                before = "свет был" if status == DOWN else "не было"
+                line += f" ({before} {fmt_duration(event['duration'])})"
             lines.append(line)
         self._reply(chat_id, "\n".join(lines))
 
@@ -255,19 +269,20 @@ class Bot:
         limit = self._int_arg(args, default=15, low=1, high=100)
         flaps = self.storage.last_flaps(limit)
         if not flaps:
-            self._reply(
-                chat_id, "Кратковременных сбоев не зафиксировано."
-            )
+            self._reply(chat_id, "Кратковременных сбоев не зафиксировано.")
             return
-        names = {t["id"]: t["name"] for t in self.monitor.targets}
-        lines = ["<b>Кратковременные пропадания</b>"]
+        targets = {t["id"]: t for t in self.monitor.targets}
+        lines = ["<b>Кратковременные сбои связи</b>"]
         for flap in flaps:
-            name = names.get(flap["target_id"], flap["target_id"])
+            target = targets.get(flap["target_id"], {"name": flap["target_id"]})
             lines.append(
-                f"⚡ {fmt_time(flap['ts'])} — {escape_html(name)}, "
-                f"около {fmt_duration(flap['seconds'])}"
+                f"⚡ {fmt_day_time(flap['ts'])} · {target_title(target)} — "
+                f"не отвечал ~{fmt_duration(flap['seconds'])}"
             )
-        lines.append("\nСтатус при таких сбоях не менялся.")
+        lines.append(
+            "\n<i>Объект ненадолго перестал отвечать и снова появился раньше, "
+            "чем подтвердилось отключение. Статус не менялся, уведомлений не было.</i>"
+        )
         self._reply(chat_id, "\n".join(lines))
 
     def cmd_stats(self, chat_id: int, args: list[str]) -> None:
