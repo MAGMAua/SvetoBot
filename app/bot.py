@@ -1,59 +1,56 @@
-"""Обработка команд и кнопок Telegram-бота (long polling)."""
+"""Telegram-бот: меню с кнопками внутри сообщения (long polling).
+
+Главный экран — одно сообщение со статусом объектов и кнопками. Нажатие
+кнопки не присылает новое сообщение, а перерисовывает это же: журнал,
+сбои, статистика и тихий режим открываются на его месте, «◀ Меню»
+возвращает к статусу. Команды тоже работают и присылают нужный экран
+новым сообщением.
+"""
 from __future__ import annotations
 
 import logging
 import time
 
-from checker import DOWN, NONET, UP
+from checker import DOWN, NONET
 from monitor import ICON, LABEL, target_title
 from util import escape_html, fmt_day_time, fmt_duration, fmt_short_time, fmt_when, now_ts
 
 log = logging.getLogger("bot")
 
 COMMANDS = [
+    ("menu", "Меню со статусом и кнопками"),
     ("status", "Текущее состояние всех объектов"),
     ("check", "Проверить прямо сейчас"),
     ("log", "Последние события (/log 20)"),
     ("flaps", "Кратковременные сбои связи"),
     ("stats", "Статистика за период (/stats 7)"),
-    ("mute", "Тихий режим на N минут (/mute 60)"),
+    ("mute", "Тихий режим (/mute 60)"),
     ("unmute", "Выключить тихий режим"),
     ("help", "Справка"),
 ]
 
-# Постоянная клавиатура внизу чата.
-BTN_STATUS = "💡 Статус"
-BTN_CHECK = "🔄 Проверить"
-BTN_LOG = "📜 Журнал"
-BTN_FLAPS = "⚡ Сбои"
-BTN_STATS = "📊 Статистика"
-BTN_MUTE = "🔕 Тихий режим"
-
-MAIN_KEYBOARD = {
-    "keyboard": [
-        [{"text": BTN_STATUS}, {"text": BTN_CHECK}],
-        [{"text": BTN_LOG}, {"text": BTN_FLAPS}],
-        [{"text": BTN_STATS}, {"text": BTN_MUTE}],
-    ],
-    "resize_keyboard": True,
-    "is_persistent": True,
+# Подписи кнопок старой клавиатуры под полем ввода: у кого она ещё
+# осталась, по нажатию получит новое меню, а клавиатура исчезнет.
+LEGACY_BUTTONS = {
+    "💡 Статус", "🔄 Проверить", "📜 Журнал", "⚡ Сбои", "📊 Статистика", "🔕 Тихий режим",
 }
 
-# Кнопки под сообщениями: (подпись, callback_data).
 STATS_PERIODS = [("Сутки", 1), ("Неделя", 7), ("Месяц", 30)]
 MUTE_OPTIONS = [("30 мин", 30), ("1 ч", 60), ("3 ч", 180), ("8 ч", 480), ("24 ч", 1440)]
 
+BACK = ("◀ Меню", "menu")
+
 HELP = (
     "<b>Мониторинг электроснабжения</b>\n\n"
-    "Пользуйтесь кнопками внизу чата:\n"
-    f"{BTN_STATUS} — текущее состояние\n"
-    f"{BTN_CHECK} — проверка прямо сейчас\n"
-    f"{BTN_LOG} — последние события\n"
-    f"{BTN_FLAPS} — кратковременные пропадания, не ставшие отключением\n"
-    f"{BTN_STATS} — отключения за сутки, неделю или месяц\n"
-    f"{BTN_MUTE} — уведомления без звука на выбранное время\n\n"
-    "Команды тоже работают: /status, /check, /log [N], /flaps [N], "
-    "/stats [дней], /mute [минут], /unmute."
+    "Всё управление — кнопками в сообщении-меню. Открыть его заново: "
+    "/menu или кнопка «Меню» слева от поля ввода.\n\n"
+    "🔄 Обновить — свежий статус\n"
+    "🔍 Проверить — внеочередная проверка\n"
+    "📜 Журнал — последние события\n"
+    "⚡ Сбои — пропадания связи, не ставшие отключением\n"
+    "📊 Статистика — за сутки, неделю или месяц\n"
+    "🔕 Тихий режим — уведомления без звука\n\n"
+    "Команды с числом: /log 30, /flaps 30, /stats 90, /mute 45."
 )
 
 
@@ -64,6 +61,14 @@ def _inline(rows: list[list[tuple[str, str]]]) -> dict:
             for row in rows
         ]
     }
+
+
+MENU_MARKUP = _inline([
+    [("🔄 Обновить", "menu"), ("🔍 Проверить", "check")],
+    [("📜 Журнал", "log"), ("⚡ Сбои", "flaps")],
+    [("📊 Статистика", "stats:7"), ("🔕 Тихий режим", "mute")],
+])
+BACK_MARKUP = _inline([[BACK]])
 
 
 class Bot:
@@ -98,32 +103,12 @@ class Bot:
         chat_id = message["chat"]["id"]
         text = (message.get("text") or "").strip()
 
-        buttons = {
-            BTN_STATUS: self.cmd_status,
-            BTN_CHECK: self.cmd_check,
-            BTN_LOG: self.cmd_log,
-            BTN_FLAPS: self.cmd_flaps,
-            BTN_STATS: self.cmd_stats,
-            BTN_MUTE: self.cmd_mute_menu,
-        }
-        if text in buttons:
-            handler, args = buttons[text], []
+        if text in LEGACY_BUTTONS:
+            command, args = "menu", []
         elif text.startswith("/"):
             parts = text.split()
             command = parts[0].split("@")[0].lstrip("/").lower()
             args = parts[1:]
-            handler = {
-                "start": self.cmd_start,
-                "status": self.cmd_status,
-                "check": self.cmd_check,
-                "log": self.cmd_log,
-                "history": self.cmd_log,
-                "flaps": self.cmd_flaps,
-                "stats": self.cmd_stats,
-                "mute": self.cmd_mute,
-                "unmute": self.cmd_unmute,
-                "help": self.cmd_help,
-            }.get(command, self.cmd_unknown)
         else:
             return
 
@@ -132,54 +117,82 @@ class Bot:
             self.telegram.send(chat_id, "Доступ запрещён.")
             return
 
-        handler(chat_id, args)
+        self._command(chat_id, command, args)
+
+    def _command(self, chat_id: int, command: str, args: list[str]) -> None:
+        """Команда присылает нужный экран новым сообщением."""
+        if command in ("start", "menu"):
+            self._remove_reply_keyboard(chat_id)
+            screen = self._menu_screen()
+        elif command == "status":
+            screen = self._menu_screen()
+        elif command == "help":
+            screen = (HELP, MENU_MARKUP)
+        elif command == "check":
+            screen = self._check_screen()
+        elif command in ("log", "history"):
+            screen = self._log_screen(self._int_arg(args, 15, 1, 100))
+        elif command == "flaps":
+            screen = self._flaps_screen(self._int_arg(args, 15, 1, 100))
+        elif command == "stats":
+            screen = self._stats_screen(self._int_arg(args, 7, 1, 365))
+        elif command == "mute":
+            if args:
+                self._set_mute(self._int_arg(args, 60, 1, 10080))
+            screen = self._mute_screen()
+        elif command == "unmute":
+            self._set_mute(0)
+            screen = self._mute_screen()
+        else:
+            screen = ("Неизвестная команда. Откройте меню: /menu", MENU_MARKUP)
+        self.telegram.send(chat_id, screen[0], reply_markup=screen[1])
 
     def _handle_callback(self, query: dict) -> None:
         message = query.get("message") or {}
         chat_id = message.get("chat", {}).get("id")
         if chat_id not in self.telegram.chat_ids:
             log.warning("нажатие кнопки из постороннего чата %s", chat_id)
-            self.telegram.answer_callback(query["id"], "Доступ запрещён.")
+            self.telegram.answer_callback(query["id"], "Доступ запрещён.", alert=True)
             return
 
-        self.telegram.answer_callback(query["id"])
         message_id = message["message_id"]
         action, _, value = (query.get("data") or "").partition(":")
 
-        if action == "stats" and value.isdigit():
-            days = max(1, min(365, int(value)))
-            self.telegram.edit(
-                chat_id, message_id, self._stats_text(days), self._stats_markup()
-            )
-        elif action == "mute" and value.isdigit():
-            minutes = max(1, min(10080, int(value)))
-            self.storage.set_setting("mute_until", str(now_ts() + minutes * 60))
-            self.telegram.edit(
-                chat_id, message_id, self._mute_text(), self._mute_markup()
-            )
-        elif action == "unmute":
-            self.storage.set_setting("mute_until", "0")
-            self.telegram.edit(
-                chat_id, message_id, self._mute_text(), self._mute_markup()
-            )
+        if action == "check":
+            # Проверка идёт несколько секунд — сразу показать, что работаем.
+            self.telegram.answer_callback(query["id"], "Проверяю…")
+            self.telegram.edit(chat_id, message_id, "🔍 Проверяю…")
+            screen = self._check_screen()
+        else:
+            self.telegram.answer_callback(query["id"])
+            if action == "log":
+                screen = self._log_screen(15)
+            elif action == "flaps":
+                screen = self._flaps_screen(15)
+            elif action == "stats" and value.isdigit():
+                screen = self._stats_screen(max(1, min(365, int(value))))
+            elif action == "mute":
+                if value.isdigit():
+                    self._set_mute(max(1, min(10080, int(value))))
+                screen = self._mute_screen()
+            elif action == "unmute":
+                self._set_mute(0)
+                screen = self._mute_screen()
+            else:  # "menu" и всё неизвестное — главный экран
+                screen = self._menu_screen()
+        self.telegram.edit(chat_id, message_id, screen[0], screen[1])
 
-    def _reply(self, chat_id: int, text: str, markup: dict | None = None) -> None:
-        """Ответ с постоянной клавиатурой, если не задана другая разметка."""
-        self.telegram.send(chat_id, text, reply_markup=markup or MAIN_KEYBOARD)
+    def _remove_reply_keyboard(self, chat_id: int) -> None:
+        """Убрать клавиатуру под полем ввода, оставшуюся от прошлой версии."""
+        sent = self.telegram.send(
+            chat_id, "Меню обновлено", reply_markup={"remove_keyboard": True}
+        )
+        if sent:
+            self.telegram.delete(chat_id, sent["message_id"])
 
-    # ---------- команды ----------
+    # ---------- экраны: (текст, кнопки) ----------
 
-    def cmd_start(self, chat_id: int, args: list[str]) -> None:
-        self._reply(chat_id, HELP)
-        self.cmd_status(chat_id, args)
-
-    def cmd_help(self, chat_id: int, args: list[str]) -> None:
-        self._reply(chat_id, HELP)
-
-    def cmd_unknown(self, chat_id: int, args: list[str]) -> None:
-        self._reply(chat_id, "Неизвестная команда. Пользуйтесь кнопками внизу чата.")
-
-    def cmd_status(self, chat_id: int, args: list[str]) -> None:
+    def _menu_screen(self) -> tuple[str, dict]:
         blocks = []
         offline_since = self.monitor.server_offline_since()
         if offline_since:
@@ -191,51 +204,50 @@ class Bot:
             )
 
         for target in self.monitor.targets:
-            state = self.storage.get_state(target["id"])
-            if not state:
-                blocks.append(f"{ICON[NONET]} <b>Нет данных</b> · {target_title(target)}")
-                continue
-
-            status = state["status"]
-            since = state["since_ts"]
-            suspect = self.monitor.suspect_since(target["id"])
-            pending = self.monitor.pending_info(target["id"])
-            if suspect:
-                deadline = suspect + self.monitor.confirm_after
-                lines = [
-                    f"🟡 <b>Нет связи</b> · {target_title(target)}",
-                    f"Не отвечает уже {fmt_duration(now_ts() - suspect)} — "
-                    "возможно, пропал свет",
-                    f"Если связь не появится до {fmt_short_time(deadline)}, "
-                    "это отключение",
-                ]
-                pending = None
-            else:
-                verb = "пропал" if status == DOWN else "появился"
-                lines = [
-                    f"{ICON[status]} <b>{LABEL[status]}</b> · {target_title(target)}",
-                    f"Уже {fmt_duration(now_ts() - since)} — {verb} {fmt_when(since)}",
-                ]
-            if pending:
-                if pending[0] == DOWN:
-                    hint = "нет ответа, проверяю связь"
-                    needed = self.monitor.fail_threshold
-                else:
-                    hint = "появился ответ, проверяю, вернулся ли свет"
-                    needed = self.monitor.ok_threshold
-                lines.append(f"⏳ {hint} ({pending[1]}/{needed})")
-            last = self.monitor.last_check.get(target["id"]) or state["last_check_ts"]
-            if last:
-                lines.append(f"<i>проверено {fmt_duration(now_ts() - last)} назад</i>")
-            blocks.append("\n".join(lines))
+            blocks.append(self._target_block(target))
 
         if self._mute_left():
             blocks.append(f"🔕 Тихий режим ещё {fmt_duration(self._mute_left())}")
 
-        self._reply(chat_id, "\n\n".join(blocks))
+        blocks.append(f"<i>Обновлено в {fmt_short_time(now_ts())}</i>")
+        return "\n\n".join(blocks), MENU_MARKUP
 
-    def cmd_check(self, chat_id: int, args: list[str]) -> None:
-        self._reply(chat_id, "🔍 Проверяю…")
+    def _target_block(self, target: dict) -> str:
+        state = self.storage.get_state(target["id"])
+        if not state:
+            return f"{ICON[NONET]} <b>Нет данных</b> · {target_title(target)}"
+
+        status = state["status"]
+        since = state["since_ts"]
+        suspect = self.monitor.suspect_since(target["id"])
+        pending = self.monitor.pending_info(target["id"])
+        if suspect:
+            deadline = suspect + self.monitor.confirm_after
+            lines = [
+                f"🟡 <b>Нет связи</b> · {target_title(target)}",
+                f"Не отвечает уже {fmt_duration(now_ts() - suspect)} — "
+                "возможно, пропал свет",
+                f"Если связь не появится до {fmt_short_time(deadline)}, "
+                "это отключение",
+            ]
+            pending = None
+        else:
+            verb = "пропал" if status == DOWN else "появился"
+            lines = [
+                f"{ICON[status]} <b>{LABEL[status]}</b> · {target_title(target)}",
+                f"Уже {fmt_duration(now_ts() - since)} — {verb} {fmt_when(since)}",
+            ]
+        if pending:
+            if pending[0] == DOWN:
+                hint = "нет ответа, проверяю связь"
+                needed = self.monitor.fail_threshold
+            else:
+                hint = "появился ответ, проверяю, вернулся ли свет"
+                needed = self.monitor.ok_threshold
+            lines.append(f"⏳ {hint} ({pending[1]}/{needed})")
+        return "\n".join(lines)
+
+    def _check_screen(self) -> tuple[str, dict]:
         lines = ["<b>Разовая проверка</b>"]
         statuses = []
         for target in self.monitor.targets:
@@ -250,19 +262,17 @@ class Bot:
                 "\n<i>Это одна проверка без подтверждения — статус меняется "
                 "только после нескольких проверок подряд.</i>"
             )
-        self._reply(chat_id, "\n".join(lines))
         # Полноценная проверка со сменой статуса и уведомлениями.
         self.monitor.check_now()
+        return "\n".join(lines), BACK_MARKUP
 
-    def cmd_log(self, chat_id: int, args: list[str]) -> None:
-        limit = self._int_arg(args, default=15, low=1, high=100)
+    def _log_screen(self, limit: int) -> tuple[str, dict]:
         events = self.storage.last_events(limit)
         if not events:
-            self._reply(chat_id, "Журнал пуст.")
-            return
+            return "📜 Журнал пуст.", BACK_MARKUP
 
         targets = {t["id"]: t for t in self.monitor.targets}
-        lines = [f"<b>Последние события ({len(events)})</b>"]
+        lines = [f"📜 <b>Последние события ({len(events)})</b>"]
         for event in events:
             target = targets.get(event["target_id"], {"name": event["target_id"]})
             status = event["status"]
@@ -274,52 +284,29 @@ class Bot:
                 before = "свет был" if status == DOWN else "не было"
                 line += f" ({before} {fmt_duration(event['duration'])})"
             lines.append(line)
-        self._reply(chat_id, "\n".join(lines))
+        return "\n".join(lines), BACK_MARKUP
 
-    def cmd_flaps(self, chat_id: int, args: list[str]) -> None:
-        limit = self._int_arg(args, default=15, low=1, high=100)
+    def _flaps_screen(self, limit: int) -> tuple[str, dict]:
         flaps = self.storage.last_flaps(limit)
         if not flaps:
-            self._reply(chat_id, "Кратковременных сбоев не зафиксировано.")
-            return
+            return "⚡ Кратковременных сбоев не зафиксировано.", BACK_MARKUP
         targets = {t["id"]: t for t in self.monitor.targets}
-        lines = ["<b>Кратковременные сбои связи</b>"]
+        lines = ["⚡ <b>Кратковременные сбои связи</b>"]
         for flap in flaps:
             target = targets.get(flap["target_id"], {"name": flap["target_id"]})
             lines.append(
-                f"⚡ {fmt_day_time(flap['ts'])} · {target_title(target)} — "
+                f"{fmt_day_time(flap['ts'])} · {target_title(target)} — "
                 f"не отвечал ~{fmt_duration(flap['seconds'])}"
             )
         lines.append(
             "\n<i>Объект ненадолго перестал отвечать и снова появился раньше, "
             "чем подтвердилось отключение. Статус не менялся.</i>"
         )
-        self._reply(chat_id, "\n".join(lines))
+        return "\n".join(lines), BACK_MARKUP
 
-    def cmd_stats(self, chat_id: int, args: list[str]) -> None:
-        days = self._int_arg(args, default=7, low=1, high=365)
-        self._reply(chat_id, self._stats_text(days), self._stats_markup())
-
-    def cmd_mute_menu(self, chat_id: int, args: list[str]) -> None:
-        self._reply(chat_id, self._mute_text(), self._mute_markup())
-
-    def cmd_mute(self, chat_id: int, args: list[str]) -> None:
-        if not args:
-            self.cmd_mute_menu(chat_id, args)
-            return
-        minutes = self._int_arg(args, default=60, low=1, high=10080)
-        self.storage.set_setting("mute_until", str(now_ts() + minutes * 60))
-        self._reply(chat_id, self._mute_text(), self._mute_markup())
-
-    def cmd_unmute(self, chat_id: int, args: list[str]) -> None:
-        self.storage.set_setting("mute_until", "0")
-        self._reply(chat_id, "🔔 Звук уведомлений включён.")
-
-    # ---------- тексты и кнопки под сообщениями ----------
-
-    def _stats_text(self, days: int) -> str:
+    def _stats_screen(self, days: int) -> tuple[str, dict]:
         since = now_ts() - days * 86400
-        lines = [f"<b>Статистика за {days} дн.</b>"]
+        lines = [f"📊 <b>Статистика за {days} дн.</b>"]
         for target in self.monitor.targets:
             data = self.storage.stats(target["id"], since)
             total = days * 86400
@@ -331,13 +318,13 @@ class Bot:
                 f"Со светом: {uptime:.1f}% времени\n"
                 f"Кратковременных сбоев: {data['flaps']}"
             )
-        return "\n".join(lines)
+        periods = [
+            (f"• {label} •" if d == days else label, f"stats:{d}")
+            for label, d in STATS_PERIODS
+        ]
+        return "\n".join(lines), _inline([periods, [BACK]])
 
-    @staticmethod
-    def _stats_markup() -> dict:
-        return _inline([[(label, f"stats:{days}") for label, days in STATS_PERIODS]])
-
-    def _mute_text(self) -> str:
+    def _mute_screen(self) -> tuple[str, dict]:
         left = self._mute_left()
         if left:
             until = int(self.storage.get_setting("mute_until"))
@@ -347,16 +334,20 @@ class Bot:
             )
         else:
             state = "🔔 Уведомления приходят со звуком."
-        return f"{state}\n\nНа сколько отключить звук?"
+        text = f"{state}\n\nНа сколько отключить звук?"
 
-    def _mute_markup(self) -> dict:
         options = [(label, f"mute:{minutes}") for label, minutes in MUTE_OPTIONS]
         rows = [options[:3], options[3:]]
-        if self._mute_left():
+        if left:
             rows.append([("🔔 Включить звук", "unmute")])
-        return _inline(rows)
+        rows.append([BACK])
+        return text, _inline(rows)
 
     # ---------- утилиты ----------
+
+    def _set_mute(self, minutes: int) -> None:
+        until = now_ts() + minutes * 60 if minutes else 0
+        self.storage.set_setting("mute_until", str(until))
 
     def _mute_left(self) -> int:
         until = self.storage.get_setting("mute_until")

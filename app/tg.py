@@ -76,8 +76,11 @@ class Telegram:
             **params,
         )
 
-    def answer_callback(self, callback_id: str, text: str | None = None):
-        params = {"text": text, "show_alert": True} if text else {}
+    def answer_callback(
+        self, callback_id: str, text: str | None = None, alert: bool = False
+    ):
+        """Подтвердить нажатие кнопки; text — всплывающая подсказка."""
+        params = {"text": text, "show_alert": alert} if text else {}
         return self._call(
             "answerCallbackQuery", callback_query_id=callback_id, **params
         )
@@ -85,6 +88,9 @@ class Telegram:
     def broadcast(self, text: str, disable_notification: bool = False):
         for chat_id in self.chat_ids:
             self.send(chat_id, text, disable_notification)
+
+    def delete(self, chat_id: int, message_id: int):
+        return self._call("deleteMessage", chat_id=chat_id, message_id=message_id)
 
     def get_updates(self, offset: int | None, timeout: int = 30):
         params = {"timeout": timeout}
