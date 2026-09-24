@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import requests
 
@@ -14,10 +15,10 @@ class Telegram:
         self.chat_ids = chat_ids
         self.session = requests.Session()
 
-    def _call(self, method: str, timeout: int = 20, **params):
+    def _call(self, method: str, http_timeout: int = 20, **params):
         try:
             response = self.session.post(
-                f"{self.base}/{method}", data=params, timeout=timeout
+                f"{self.base}/{method}", data=params, timeout=http_timeout
             )
             payload = response.json()
             if not payload.get("ok"):
@@ -49,7 +50,12 @@ class Telegram:
         params = {"timeout": timeout}
         if offset is not None:
             params["offset"] = offset
-        return self._call("getUpdates", timeout=timeout + 15, **params) or []
+        result = self._call("getUpdates", http_timeout=timeout + 15, **params)
+        if result is None:
+            # Сеть или API недоступны — не долбить сервер в цикле.
+            time.sleep(5)
+            return []
+        return result
 
     def set_commands(self, commands: list[tuple[str, str]]):
         import json

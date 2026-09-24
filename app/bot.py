@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from checker import DOWN, NONET, UP
 from monitor import ICON, LABEL
@@ -49,6 +50,7 @@ class Bot:
                     self._handle(update)
             except Exception:  # noqa: BLE001
                 log.exception("ошибка обработки обновлений")
+                time.sleep(5)
 
     # ---------- маршрутизация ----------
 
